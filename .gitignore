@@ -217,3 +217,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 .env 
+
+# Claude Code local tooling
+.claude/
+CLAUDE.md

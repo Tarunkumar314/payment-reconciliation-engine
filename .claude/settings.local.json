@@ -1,7 +1,0 @@
-{
-  "env": {
-    "ANTHROPIC_BASE_URL": "http://localhost:4000",
-    "ANTHROPIC_AUTH_TOKEN": "dummy_token",
-    "ANTHROPIC_API_KEY": ""
-  }
-}
