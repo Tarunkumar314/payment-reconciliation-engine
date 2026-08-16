@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.models.ledger import Account, Transaction, LedgerEntry, AccountType, EntryType, TransactionStatus
+from app.models.outbox import OutboxEvent, OutboxEventType
 from app.redis_client import redis_client
 from app.schemas import (
     AccountCreate,
@@ -177,14 +178,28 @@ async def create_transaction(
 
     tx_status = TransactionStatus.HELD_FOR_REVIEW if held else TransactionStatus.POSTED
 
-    # ── 4. Atomic ledger write ────────────────────────────────────────────────
+    # ── 4. Atomic ledger write + outbox insert ───────────────────────────────
+    # The OutboxEvent INSERT lives inside the SAME begin_nested() block as the
+    # Transaction and LedgerEntry rows.  A single COMMIT covers all three.
+    # This is the invariant that makes the outbox pattern correct:
+    #   - If the DB write fails → all three rows roll back, no phantom event.
+    #   - If COMMIT succeeds   → ledger and outbox are durable together;
+    #     the relay can publish to Kafka at any future time.
+    # Separating the outbox INSERT into a second commit would reintroduce the
+    # same two-phase reliability gap the pattern exists to eliminate.
+    event_type = (
+        OutboxEventType.TRANSACTION_HELD
+        if tx_status == TransactionStatus.HELD_FOR_REVIEW
+        else OutboxEventType.TRANSACTION_POSTED
+    )
+
     async with db.begin_nested() if db.in_transaction() else db.begin():
         transaction = Transaction(
             description=tx_in.description,
             status=tx_status,
         )
         db.add(transaction)
-        await db.flush()  # Generates transaction.id
+        await db.flush()  # Generates transaction.id — needed by both LedgerEntry FK and outbox payload
 
         for entry_in in tx_in.entries:
             ledger_entry = LedgerEntry(
@@ -194,6 +209,28 @@ async def create_transaction(
                 amount=entry_in.amount,
             )
             db.add(ledger_entry)
+
+        # Outbox row: same transaction scope, published_at starts NULL.
+        # Payload carries enough context for the consumer to process the event
+        # without needing to re-query the ledger (self-contained event).
+        outbox_event = OutboxEvent(
+            transaction_id=transaction.id,
+            event_type=event_type,
+            payload={
+                "transaction_id": str(transaction.id),
+                "status": tx_status.value,
+                "description": tx_in.description,
+                "entries": [
+                    {
+                        "account_id": str(e.account_id),
+                        "entry_type": e.entry_type.value,
+                        "amount": str(e.amount),
+                    }
+                    for e in tx_in.entries
+                ],
+            },
+        )
+        db.add(outbox_event)
 
     # ── 5. Build response ─────────────────────────────────────────────────────
     result = await db.execute(

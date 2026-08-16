@@ -52,7 +52,7 @@ from dotenv import load_dotenv
 from app.main import app
 from app.database import get_db
 from app.models.base import Base
-from app.models import Account, Transaction, LedgerEntry  # noqa: F401 — ensures ORM metadata is registered
+from app.models import Account, Transaction, LedgerEntry, OutboxEvent  # noqa: F401 — ensures ORM metadata is registered
 
 load_dotenv()
 
