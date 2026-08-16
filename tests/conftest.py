@@ -43,6 +43,7 @@ import os
 import asyncio
 import pytest
 import pytest_asyncio
+from unittest.mock import patch
 from httpx import AsyncClient, ASGITransport
 from sqlalchemy.pool import NullPool
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
@@ -60,6 +61,7 @@ TEST_DATABASE_URL = os.environ["TEST_DATABASE_URL"]
 # NullPool: no connection reuse across coroutine contexts.
 # Scoped to this test engine only — does not touch app/database.py.
 test_engine = create_async_engine(TEST_DATABASE_URL, poolclass=NullPool, echo=False)
+
 
 
 # ── Schema lifecycle ──────────────────────────────────────────────────────────
@@ -141,3 +143,161 @@ async def client(db_session):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.clear()
+
+
+# ── Redis fixtures for idempotency / fraud velocity tests ─────────────────────
+#
+# Why real Redis (not fakeredis):
+#   We use real Postgres for ledger tests to catch NUMERIC precision, ENUM
+#   constraints, and FK cascade behaviour that SQLite doesn't enforce.  The
+#   same principle applies here: real Redis exercises actual pipeline
+#   semantics, sorted-set scoring, and TTL expiry behaviour.
+#
+# Isolation strategy — DB index + key namespace:
+#   Redis doesn't have savepoints.  Instead we:
+#     1. Use Redis DB 1 (DB 0 = production, DB 1 = test) — hard-wired.
+#     2. Give each test a unique UUID4 namespace prefix.  All keys written by
+#        the idempotency and velocity services are prefixed with this value,
+#        so two concurrent test runs never collide.
+#     3. FLUSHDB at fixture teardown to leave the test DB clean.
+#
+# How the prefix is injected:
+#   The services use key formats "idempotency:{key}" and "velocity:{account}".
+#   We wrap the redis client in a thin KeyPrefixRedis adapter that prepends
+#   the namespace to every key operation.  This is simpler than patching the
+#   format strings inside each service.
+
+import uuid as _uuid
+import redis.asyncio as _aioredis
+
+TEST_REDIS_URL = os.environ.get("TEST_REDIS_URL", "redis://localhost:6379/1")
+
+
+class _PrefixedRedis:
+    """
+    Transparent proxy around a redis.asyncio.Redis that prepends `prefix:`
+    to every key argument.  Supports all commands used by the services:
+    GET, SET, ZADD, ZREMRANGEBYSCORE, ZCARD, EXPIRE, TTL, and pipeline().
+    """
+
+    def __init__(self, client: _aioredis.Redis, prefix: str):
+        self._r = client
+        self._prefix = prefix
+
+    def _k(self, key: str) -> str:
+        return f"{self._prefix}:{key}"
+
+    async def get(self, key: str):
+        return await self._r.get(self._k(key))
+
+    async def set(self, key: str, value, **kwargs):
+        return await self._r.set(self._k(key), value, **kwargs)
+
+    async def zadd(self, key: str, mapping: dict, **kwargs):
+        return await self._r.zadd(self._k(key), mapping, **kwargs)
+
+    async def zcard(self, key: str):
+        return await self._r.zcard(self._k(key))
+
+    async def zremrangebyscore(self, key: str, min, max):
+        return await self._r.zremrangebyscore(self._k(key), min, max)
+
+    async def expire(self, key: str, seconds: int):
+        return await self._r.expire(self._k(key), seconds)
+
+    async def ttl(self, key: str):
+        return await self._r.ttl(self._k(key))
+
+    async def ping(self):
+        return await self._r.ping()
+
+    def pipeline(self, transaction: bool = True) -> "_PrefixedPipeline":
+        return _PrefixedPipeline(self._r.pipeline(transaction=transaction), self._prefix)
+
+    async def aclose(self):
+        pass  # shared client — caller manages lifecycle
+
+
+class _PrefixedPipeline:
+    """Pipeline proxy that applies the same key prefix to queued commands."""
+
+    def __init__(self, pipe, prefix: str):
+        self._pipe = pipe
+        self._prefix = prefix
+
+    def _k(self, key: str) -> str:
+        return f"{self._prefix}:{key}"
+
+    def zadd(self, key: str, mapping: dict, **kwargs):
+        self._pipe.zadd(self._k(key), mapping, **kwargs)
+        return self
+
+    def zremrangebyscore(self, key: str, min, max):
+        self._pipe.zremrangebyscore(self._k(key), min, max)
+        return self
+
+    def zcard(self, key: str):
+        self._pipe.zcard(self._k(key))
+        return self
+
+    def expire(self, key: str, seconds: int):
+        self._pipe.expire(self._k(key), seconds)
+        return self
+
+    async def execute(self):
+        return await self._pipe.execute()
+
+    async def __aenter__(self):
+        await self._pipe.__aenter__()
+        return self
+
+    async def __aexit__(self, *args):
+        return await self._pipe.__aexit__(*args)
+
+
+@pytest_asyncio.fixture
+async def test_redis():
+    """
+    Real async Redis client pointed at DB 1 (test database).
+
+    Each test gets a unique prefix; the DB is flushed at teardown.
+    The fixture yields a (_PrefixedRedis, raw_client) tuple so tests
+    can inspect keys directly via the raw client if needed.
+    """
+    raw = _aioredis.from_url(TEST_REDIS_URL, encoding="utf-8", decode_responses=True)
+    prefix = str(_uuid.uuid4())
+    prefixed = _PrefixedRedis(raw, prefix)
+    yield prefixed, raw
+    # Teardown: flush the test DB to keep it clean for the next run
+    await raw.flushdb()
+    await raw.aclose()
+
+
+@pytest_asyncio.fixture
+async def client_with_redis(db_session, test_redis):
+    """
+    ASGI client + DB override + real prefixed Redis injected.
+
+    The prefixed Redis is patched in at the router and service level so
+    every key written during the test carries the unique namespace prefix.
+    Tests can pre-seed the store via the `test_redis` fixture and the
+    router will see those entries through the same prefixed client.
+    """
+    prefixed_redis, raw_redis = test_redis
+
+    async def _override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _override_get_db
+
+    with (
+        patch("app.routers.ledger.redis_client", prefixed_redis),
+        patch("app.services.idempotency.redis_client", prefixed_redis, create=True),
+        patch("app.services.fraud.redis_client", prefixed_redis, create=True),
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            yield ac, prefixed_redis
+
+    app.dependency_overrides.clear()
+

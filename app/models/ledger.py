@@ -28,6 +28,7 @@ class TransactionStatus(str, enum.Enum):
     PENDING = "PENDING"
     POSTED = "POSTED"
     REJECTED = "REJECTED"
+    HELD_FOR_REVIEW = "HELD_FOR_REVIEW"  # Fraud velocity threshold exceeded; written but frozen
 
 
 class Account(Base):
