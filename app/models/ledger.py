@@ -29,6 +29,8 @@ class TransactionStatus(str, enum.Enum):
     POSTED = "POSTED"
     REJECTED = "REJECTED"
     HELD_FOR_REVIEW = "HELD_FOR_REVIEW"  # Fraud velocity threshold exceeded; written but frozen
+    SETTLED = "SETTLED"                  # Bank confirmed settlement — terminal
+    SETTLEMENT_FAILED = "SETTLEMENT_FAILED"  # Exhausted retries — terminal, event on DLQ
 
 
 class Account(Base):

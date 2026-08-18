@@ -38,20 +38,83 @@ services:
     container_name: reconcile_kafka
     restart: unless-stopped
     ports:
-      - "9092:9092"
+      - "9092:9092"   # EXTERNAL — host access via localhost:9092
+      # 29092 (INTERNAL) is container-only; no host mapping needed
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: 'broker,controller'
-      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093'
-      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://localhost:9092'
-      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT'
-      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@localhost:9093'
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LISTENERS:            'EXTERNAL://0.0.0.0:9092,INTERNAL://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093'
+      KAFKA_ADVERTISED_LISTENERS: 'EXTERNAL://localhost:9092,INTERNAL://kafka:29092'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'EXTERNAL:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'INTERNAL'
+      KAFKA_CONTROLLER_LISTENER_NAMES:  'CONTROLLER'
+      KAFKA_CONTROLLER_QUORUM_VOTERS:   '1@localhost:9093'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR:         1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR:            1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS:         0
       CLUSTER_ID: '4L62xD12T_2H1W_xY5yZ_g'
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+
+  app:
+    build: .
+    container_name: reconcile_app
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://reconcile_user:reconcile_pass@postgres:5432/reconcile_db
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092  # INTERNAL listener — container-to-container
+      # Container-to-container: the app calls its OWN /mock-bank/settle endpoint.
+      # localhost:8000 would route to the host, not back into this container.
+      MOCK_BANK_URL: http://app:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  settlement_worker:
+    build: .
+    container_name: reconcile_settlement_worker
+    restart: unless-stopped
+    command: ["python", "-m", "app.settlement_worker"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://reconcile_user:reconcile_pass@postgres:5432/reconcile_db
+      REDIS_URL: redis://redis:6379/0
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092  # INTERNAL listener — container-to-container
+      # Must reach the app container, not localhost, to call /mock-bank/settle.
+      MOCK_BANK_URL: http://app:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  outbox_relay:
+    build: .
+    container_name: reconcile_outbox_relay
+    restart: unless-stopped
+    command: ["python", "-m", "app.outbox_relay"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://reconcile_user:reconcile_pass@postgres:5432/reconcile_db
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092  # INTERNAL listener — container-to-container
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
 
 volumes:
   postgres_data:

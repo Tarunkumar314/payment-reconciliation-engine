@@ -5,6 +5,7 @@ from fastapi import FastAPI, Response, status
 from app.database import check_database_health, init_db
 from app.redis_client import check_redis_health
 from app.routers import ledger
+from app.routers import mock_bank
 
 
 @asynccontextmanager
@@ -26,6 +27,7 @@ app = FastAPI(
 )
 
 app.include_router(ledger.router)
+app.include_router(mock_bank.router)
 
 
 @app.get("/health", status_code=status.HTTP_200_OK)

@@ -255,22 +255,52 @@ class _PrefixedPipeline:
         return await self._pipe.__aexit__(*args)
 
 
-@pytest_asyncio.fixture
-async def test_redis():
+@pytest.fixture
+def test_redis():
     """
     Real async Redis client pointed at DB 1 (test database).
 
     Each test gets a unique prefix; the DB is flushed at teardown.
     The fixture yields a (_PrefixedRedis, raw_client) tuple so tests
     can inspect keys directly via the raw client if needed.
+
+    Why sync fixture + asyncio.run() for teardown (mirrors setup_schema)
+    ────────────────────────────────────────────────────────────────────
+    pytest-asyncio runs async fixture teardown via plugin.py::finalizer →
+    runner.run(async_finalizer()), which creates a BRAND-NEW event loop
+    (loop B).  The `raw` Redis client lazily establishes connections during
+    the test in loop A (the per-test loop pytest-asyncio manages).  When
+    teardown runs in loop B, the asyncio connection layer sees those
+    sockets as belonging to a dead loop: asyncio.open_connection() raises
+    CancelledError, the pool retries, times out, and surfaces as:
+
+        redis.exceptions.TimeoutError: Timeout connecting to server
+
+    This is the exact same "stranded connection" problem that NullPool +
+    asyncio.run() solved for asyncpg.  The fix is identical: make the
+    fixture synchronous so teardown runs in a plain Python call frame, then
+    use asyncio.run() with a FRESH Redis client that has no prior
+    connections.  The fresh client owns its TCP connection from birth to
+    close inside one self-contained loop — no stranding possible.
+
+    `raw` itself (loop-A connections) is left for GC; the pool connections
+    are closed when the OS reclaims the sockets after loop A exits.
     """
     raw = _aioredis.from_url(TEST_REDIS_URL, encoding="utf-8", decode_responses=True)
     prefix = str(_uuid.uuid4())
     prefixed = _PrefixedRedis(raw, prefix)
     yield prefixed, raw
-    # Teardown: flush the test DB to keep it clean for the next run
-    await raw.flushdb()
-    await raw.aclose()
+
+    # Teardown: fresh client in its own isolated loop — never shares
+    # connections with loop A, so no CancelledError / TimeoutError.
+    async def _flush():
+        client = _aioredis.from_url(TEST_REDIS_URL, encoding="utf-8", decode_responses=True)
+        try:
+            await client.flushdb()
+        finally:
+            await client.aclose()
+
+    asyncio.run(_flush())
 
 
 @pytest_asyncio.fixture

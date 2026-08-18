@@ -18,6 +18,17 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
 
     KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
+    KAFKA_SETTLEMENT_TOPIC: str = "settlement-events"
+    KAFKA_DLQ_TOPIC: str = "settlement-events-dlq"
+
+    # Mock bank settings
+    MOCK_BANK_URL: str = "http://localhost:8000"  # points at self in dev; overridden in Docker
+    MOCK_BANK_FAILURE_RATE: float = 0.2           # 0.0 = never fail, 1.0 = always fail
+    MOCK_BANK_DELAY_MS: int = 100                 # artificial latency in milliseconds
+
+    # Settlement worker retry config
+    SETTLEMENT_MAX_RETRIES: int = 3
+    SETTLEMENT_BASE_BACKOFF_SECONDS: float = 1.0
 
     model_config = SettingsConfigDict(
         env_file=".env",
