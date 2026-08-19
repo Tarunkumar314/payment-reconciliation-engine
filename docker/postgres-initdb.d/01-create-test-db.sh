@@ -4,7 +4,7 @@
 #   docker exec reconcile_postgres psql -U reconcile_user -c "CREATE DATABASE reconcile_test_db OWNER reconcile_user;"
 set -e
 
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<-EOSQL
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
     SELECT 'CREATE DATABASE reconcile_test_db OWNER $POSTGRES_USER'
     WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'reconcile_test_db')\gexec
 EOSQL
