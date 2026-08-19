@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # This script runs automatically on a FRESH postgres container (empty data volume).
 # For an existing volume, create the test DB manually:
 #   docker exec reconcile_postgres psql -U reconcile_user -c "CREATE DATABASE reconcile_test_db OWNER reconcile_user;"
