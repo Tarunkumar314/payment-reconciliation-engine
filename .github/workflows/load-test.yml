@@ -1,0 +1,42 @@
+name: Load Test (k6)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  load-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Create .env file
+        run: cp .env.example .env
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install -y k6
+
+      - name: Build and Start Full Docker Stack
+        run: |
+          docker compose up -d --build
+
+      - name: Wait for Stack Readiness
+        run: |
+          echo "Waiting for FastAPI application to report healthy at http://localhost:8000/health..."
+          timeout 120s bash -c 'until curl -s -f http://localhost:8000/health | grep -q "healthy"; do sleep 3; done'
+          echo "Full payment reconciliation stack is live and ready for load testing!"
+
+      - name: Run k6 Load Test
+        run: |
+          k6 run k6/load_test.js
+
+      - name: Dump Container Logs on Failure
+        if: failure()
+        run: |
+          docker compose logs --tail=100

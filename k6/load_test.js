@@ -13,21 +13,39 @@ export const options = {
   },
 };
 
-const DEBIT_ACCOUNT_ID = 'df2fd8af-836f-4a11-a311-0f7d784f3431';
-const CREDIT_ACCOUNT_ID = 'b1ed23fa-78d3-4db9-827b-de4d664a23d3';
+export function setup() {
+  const headers = { 'Content-Type': 'application/json' };
+  
+  const debitRes = http.post('http://localhost:8000/accounts', JSON.stringify({
+    name: 'k6 Load Test Asset Account',
+    account_type: 'ASSET',
+    currency: 'USD',
+  }), { headers });
 
-export default function () {
+  const creditRes = http.post('http://localhost:8000/accounts', JSON.stringify({
+    name: 'k6 Load Test Revenue Account',
+    account_type: 'REVENUE',
+    currency: 'USD',
+  }), { headers });
+
+  return {
+    debitAccountId: JSON.parse(debitRes.body).id,
+    creditAccountId: JSON.parse(creditRes.body).id,
+  };
+}
+
+export default function (data) {
   const url = 'http://localhost:8000/transactions';
   const payload = JSON.stringify({
     description: 'k6 load test transaction',
     entries: [
       {
-        account_id: DEBIT_ACCOUNT_ID,
+        account_id: data.debitAccountId,
         entry_type: 'DEBIT',
         amount: '10.0000',
       },
       {
-        account_id: CREDIT_ACCOUNT_ID,
+        account_id: data.creditAccountId,
         entry_type: 'CREDIT',
         amount: '10.0000',
       },
