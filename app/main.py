@@ -1,6 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Response, status
+from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.database import check_database_health, init_db
 from app.redis_client import check_redis_health
@@ -28,6 +29,10 @@ app = FastAPI(
 
 app.include_router(ledger.router)
 app.include_router(mock_bank.router)
+
+# Wire up Prometheus metrics — must be called after routers are registered
+# so every route is captured. expose() mounts the /metrics endpoint.
+Instrumentator().instrument(app).expose(app)
 
 
 @app.get("/health", status_code=status.HTTP_200_OK)

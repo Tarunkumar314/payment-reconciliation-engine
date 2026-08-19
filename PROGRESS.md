@@ -37,6 +37,17 @@
     - `app` service had no `command:` — bare `python3` exits immediately causing restart loop
       — fixed with `uvicorn app.main:app --host 0.0.0.0 --port 8000`
 
+- **Step 6**: Observability & load testing (Prometheus + Grafana + k6)
+  — verified end-to-end with 8 containers running:
+    - FastAPI app auto-instrumented with `prometheus-fastapi-instrumentator` exposing `/metrics`
+    - Prometheus container scraping `app:8000/metrics` every 5s (verified `health: up`)
+    - Grafana container pre-provisioned with Prometheus datasource and dashboard tracking P95 latency, request rate, and error rate
+    - k6 load test executed with 50 concurrent virtual users ramping over 30s, holding for 60s, ramping down over 30s:
+      - Total transactions processed: **7,554**
+      - P95 response time: **1.17s** (target threshold < 2.0s: PASSED)
+      - Error rate: **0.00%** (0 / 7554 failed; target threshold < 5%: PASSED)
+      - Sustained throughput: **62.90 req/s**
+
 ## Not yet verified in this session
 - DLQ exhaustion path (retry-then-succeed was observed; full retry exhaustion + DLQ publish
   was not triggered in the live run — confirmed via code only, not live log lines)
@@ -52,5 +63,3 @@
 - `enable_auto_commit=False` on all Kafka consumers — offset committed only after terminal state
 - Outbox relay is a separate process/container, not a background thread inside the app
 
-## Next
-- Step 6: not started
